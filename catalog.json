@@ -1,0 +1,24 @@
+{
+    "tables": {
+        "users": {
+            "file": "users.tbl",
+            "columns": [
+                {
+                    "name": "id",
+                    "type": "int",
+                    "size": 4
+                },
+                {
+                    "name": "age",
+                    "type": "int",
+                    "size": 4
+                },
+                {
+                    "name": "name",
+                    "type": "char",
+                    "size": 8
+                }
+            ]
+        }
+    }
+}
