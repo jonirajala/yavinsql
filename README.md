@@ -170,3 +170,32 @@ Order to build it:
 6. Add WHERE col = value (filter)
 7. REPL around it
 8. INSERT
+
+
+
+
+
+1. Spaces and quotes aren't the only separators. In SELECT id,name FROM users WHERE age>=30, there's no space between id, , and name, or between age, >= and 30. Splitting on spaces and quotes would give you id,name and age>=30 as single pieces. Symbols like ,, *, =, <, >, ( and ) are tokens of their own and also end whatever came before them.
+
+2. Read it as "what kind of token starts here?" rather than "where do I split?". The usual structure:
+
+- Keep a position in the string
+- Look at the current character, which tells you what kind of token is starting:
+  - space: skip it
+  - ': string, so consume until the closing '
+  - digit: number, so consume while digits
+  - letter: word, so consume while letters, digits or _, then check whether it's a keyword or an identifier
+  - , * ( ): single-character token
+  - < > = !: operator, which may be two characters
+  - anything else: error, unknown character
+- Emit the token, continue from where it ended, and repeat until the end of the string
+
+Each kind of token knows its own end rule. You never decide on separators globally.
+
+Questions to think through:
+- How do you tell < from <=? (Hint: look at the next character without consuming it. This is called peeking or lookahead.)
+- What should happen with 'bob when the closing quote is missing?
+- How would you put a ' inside a string? In SQL you write it twice: 'it''s'.
+- Should SELECT and select be the same keyword?
+
+A note on naming: this step is called tokenizing or lexing. Parsing is the next step, which takes the token list and checks its structure. Keeping the two words separate helps when you read about them.
