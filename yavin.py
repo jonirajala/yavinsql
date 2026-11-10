@@ -41,6 +41,8 @@ symbols = {'*': Tokentype.STAR, ',': Tokentype.COMMA}
 one_char_operators = {'=': Tokentype.EQ, '<': Tokentype.LT, '>': Tokentype.GT}
 two_char_operators = {'!=': Tokentype.NEQ,'<>': Tokentype.NEQ, '<=': Tokentype.LTE, '>=': Tokentype.GTE}
 
+OPERATORS = (list(one_char_operators.values()) + list(two_char_operators.values()))
+
 class Token:
     def __init__(self, type, value, pos):
         self.type = type
@@ -225,13 +227,16 @@ Query {
 @dataclass
 class Select:
     columns: list
-    from_: str
-    where: list
+    from_: Table
+    where: Comparision | AND | OR = None
 
 @dataclass
 class Column:
     col: str
     table: str = None
+    index: int = None
+    type: str = None
+
 
 @dataclass
 class Table:
@@ -240,6 +245,11 @@ class Table:
 @dataclass
 class Literal:
     val: int | str
+
+@dataclass
+class Star:
+    pass
+
 
 @dataclass
 class Comparision:
@@ -252,6 +262,7 @@ class AND:
     left: Comparision | AND | OR
     right: Comparision | AND | OR
 
+@dataclass
 class OR:
     left: Comparision | AND | OR
     right: Comparision | AND | OR
@@ -261,8 +272,6 @@ class Parser:
     def __init__(self):
         self.tokens = []
         self.position = 0
-        self.parsed_query = {'columns': [], 'from': [], 'where': []}
-
     
     def current(self):
         assert self.tokens is not None
@@ -270,99 +279,150 @@ class Parser:
 
     def advance(self):
         assert self.tokens is not None
-        if self.position >= len(self.tokens) - 1: return ""
+        if self.position >= len(self.tokens) - 1: return self.tokens[self.position] # at eof
         self.position += 1
-        return self.tokens[self.position]
+        return self.tokens[self.position-1]
 
     def peek(self):
         assert self.tokens is not None
-        if self.position >= len(self.tokens) - 1: return ""
+        if self.position >= len(self.tokens) - 1: return self.tokens[self.position] #eof
         return self.tokens[self.position+1]
 
+    def expect(self, type):
+        if self.current().type != type:
+            raise ValueError(f"Expected {type}, got {self.current()} in position {self.current().pos}")
 
     def parse(self, tokens):
         self.tokens = tokens
         self.position = 0
-        self.parsed_query = {'columns': [], 'from': [], 'where': []}
 
-        self.parse_query()
-        return self.parsed_query
+        parsed_query = self.parse_query()
 
+        return parsed_query
+    
 
 
     def parse_query(self):
-        token = self.current()
-        if token.type != Tokentype.SELECT: raise ValueError(f"Expected SELECT, got {token} in position {self.position}")
+        self.expect(Tokentype.SELECT)
         token = self.advance()
 
-        self.parse_columns()
+        columns = self.parse_columns()   
 
-        token = self.current()
-        if token.type != Tokentype.FROM: raise ValueError(f"Expected FROM, got {token} in position {self.position}")
-        self.parse_from()
-        
-        
+
+        self.expect(Tokentype.FROM)
         token = self.advance()
+        tables = self.parse_from()
         
-        if token.type == Tokentype.WHERE: self.parse_where()
-        elif token.type == Tokentype.EOF: return
-        else: raise ValueError(f"Expected EOF, got {token} in position {self.position}")
+        token = self.current()
+        
+        if token.type == Tokentype.WHERE:
+            token = self.advance()
+            filters = self.parse_where()
+        else: filters = None 
+
+        self.expect(Tokentype.EOF)
+
+        return Select(columns, tables,  filters)
 
     
     def parse_columns(self):
+        columns = []
         while True:
-            token = self.current()
-            if token.type  not in (Tokentype.IDENTIFIER, Tokentype.STAR) : raise ValueError(f"Expected IDENTIFIER, got {token} in position {self.position}")
-            self.parsed_query['columns'].append(Column(token.value))
-
-            token = self.advance()
-
-            if token.type == Tokentype.COMMA: token = self.advance()
-            else: return
+            next_token = self.current()
+            if next_token.type == Tokentype.IDENTIFIER:
+                token = self.advance()
+                columns.append(Column(token.value)) 
+            elif next_token.type == Tokentype.STAR:
+                token = self.advance()
+                columns.append(Star()) 
+            else: self.expect(Tokentype.IDENTIFIER)
+            
+            next_token = self.current()
+            if next_token.type == Tokentype.COMMA: 
+                token = self.advance()
+                continue
+            else: break
+        return columns
 
 
     def parse_from(self):
+
+        self.expect(Tokentype.IDENTIFIER)
         token = self.advance()
-        if token.type != Tokentype.IDENTIFIER: raise ValueError(f"Expected IDENTIFIER, got {token} in position {self.position}")
-        self.parsed_query['from'] = token.value
+        return Table(token.value)
+
+
+
+
 
     def parse_where(self):
-        while True:
-            comparision = self.parse_condition()
+        comparision = self.parse_or()
+        return comparision
+
+    def parse_or(self):
+        comparision = self.parse_and()
+        while self.current().type == Tokentype.OR:
+            self.advance()
+            comparision_right = self.parse_and()
+            comparision = OR(comparision, comparision_right)
+        return comparision
+
+
+    def parse_and(self):
+        comparision = self.parse_condition()
+        while self.current().type == Tokentype.AND:
+
+            self.advance()
+            comparision_right = self.parse_condition()
+            comparision = AND(comparision, comparision_right)
+
+        return comparision
+
+    def parse_operand(self):
+        next_token = self.current()
+
+        if next_token.type == Tokentype.IDENTIFIER:
             token = self.advance()
-
-            if token.type == Tokentype.AND:
-                comparision_right = self.parse_condition()
-                comp = AND(comparision, comparision_right)
-            elif token.type == Tokentype.OR:
-                comparision_right = self.parse_condition()
-                comp = OR(comparision, comparision_right)
-
-            else: return
-
+            val = Column(token.value)
+        elif next_token.type in (Tokentype.STRING, Tokentype.INT):
+            token = self.advance()
+            val = Literal(token.value)
+        else: self.expect('IDENTIFIER, INT or STR')
+        
+        return val
 
             
     def parse_condition(self):
-        left_token = self.advance()
-
-        if left_token.type == Tokentype.IDENTIFIER: left = Column(left_token.value)
-        elif left_token.type in (Tokentype.STRING, Tokentype.INT): left = Literal(left_token.value)
-        else: raise ValueError(f"Expected IDENTIFIER, INT or STR, got {left_token} in position {self.position}")
-
+        left = self.parse_operand()
+    
+        next_token = self.current()
+        if next_token.type not in OPERATORS: self.expect('OPERATOR')
+        op = self.advance().type
+        right = self.parse_operand()
         
+        return Comparision(left, op, right)
 
 
-        op_token = self.advance()
+class Binder:
+    def __init__(self, catalog_file='catalog.json'):
+        self.catalog_file = catalog_file
+        self.schema = self.get_schema()
+        self.parsed_tree = None
+        self.query_tree = None
 
-        if op_token.type not in (list(one_char_operators.keys()) + list(two_char_operators.keys())): raise ValueError(f"Expected operator, got {left_token} in position {self.position}")
+    def get_schema(self):
+        with open(self.catalog_file) as f:
+            data = json.load(f)
+        return data
 
-        right_token = self.advance()
-        if right_token.type == Tokentype.IDENTIFIER: left = Column(right_token.value)
-        elif right_token.type in (Tokentype.STRING, Tokentype.INT): left = Literal(right_token.value)
-        else: raise ValueError(f"Expected IDENTIFIER, INT or STR, got {right_token} in position {self.position}")
+    def bind(self, parsed_tokens):
+        self.parsed_tree = parsed_tokens
+        self.query_tree = parsed_tokens
+
+        print(self.schema)
+
+    def check_columns(self):
         
-        return Comparision(right_token.value, op_token, right_token.value)
-
     
 
 
@@ -380,15 +440,19 @@ class Executor:
         print(self.schema)
 
 
-query = """ SELECT name, id FROM t where a != 21 and c = "lsdkf" """
+query = """ SELECT name, id FROM t where a != 21 and c = "lsdkf" or 1 = 1"""
 
 executor = Executor()
 tokenizer = Tokenizer()
+parser = Parser()
+binder = Binder()
 
 tokens = tokenizer.tokenize(query)
-
-parser = Parser()
+print(tokens)
 parsed_tokens = parser.parse(tokens)
 
 print(parsed_tokens)
+
+query_tree = binder.bind(parsed_tokens)
+
 # executor.run(query)
