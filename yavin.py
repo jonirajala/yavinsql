@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 from enum import Enum, auto
 from dataclasses import dataclass
+import struct
 
 
 
@@ -496,18 +497,69 @@ class Binder:
         for col in self.parsed_tokens.columns: new_col_list += self.check_column(col)
         self.parsed_tokens.columns = new_col_list
 
+
+STRUCT_CODES = {'int': "i", 'char': '8s'}
+
 class Executor:
     def __init__(self, catalog_file='catalog.json'):
         self.catalog_file = catalog_file
         self.schema = self.get_schema()
+
+        self.struct_info = {}
+        self.tables = {}
+        self.columns = None
 
     def get_schema(self):
         with open(self.catalog_file) as f:
             data = json.load(f)
         return data
 
+    def create_struct_strings(self):
+        for table_name, table_doc in self.tables.items():
+            cols = table_doc['columns']
+            codes = "<"
+            size = 0
+            for col in cols:
+                size += col['size']
+                codes += STRUCT_CODES[col['type']]
+
+            self.struct_info[table_name] = (codes, size)
+
+    def scan(self, table_name, table_doc):
+        struct_code, struct_size = self.struct_info[table_name]
+        
+        with open(table_doc['file'], "rb") as f:
+            while row := f.read(struct_size):
+                
+                data = struct.unpack(struct_code, row)
+
+
+                out = []
+                # for i in char_ids:
+                for i, col in enumerate(table_doc['columns']):
+                    if col['type'] == 'char':
+                        out.append(data[i].rstrip(b"\x00").decode())
+                    else:
+                        out.append(data[i])
+
+                out = tuple(out)
+
+                yield out
+
+    def eval_where(self, row):
+        pass
+
     def run(self, query):
-        print(self.schema)
+        queried_tables = [query.from_] # needs fix when multiple tabels
+        self.tables = {}
+        for table in queried_tables:
+            self.tables[table.table] = self.schema['tables'][table.table]
+
+        self.create_struct_strings()
+
+        for table_name, table_doc in self.tables.items():
+            for x in self.scan(table_name, table_doc):
+                print(x)
 
 
 query = """ SELECT id FROM users where id != 21"""
@@ -527,3 +579,34 @@ query_tree = binder.bind(parsed_tokens)
 print(query_tree)
 # print(query_tree)
 executor.run(query_tree)
+
+
+
+
+
+
+"""
+column), and the row size from it. This replaces the hardcoded "<ii8s" and 16.
+
+2. Scan
+- Open the table's file and read one row at a time (row-size bytes)
+- Unpack each row into a tuple of values, e.g. (1, 30, 'bob'), stripping the zero padding from char values
+- Ideally as a generator: yield rows one at a time instead of loading the whole file
+
+3. Filter (WHERE)
+- For each row, evaluate the where tree, with the recursive function: And/Or combine their children, and a Comparison gets each side's value and applies the operator
+  - Column: row[column.index], which is where the binder's indexes get used
+  - Literal: its value
+- Keep the row if the result is true; if where is None, keep every row
+
+4. Project (SELECT list)
+- From each kept row, build a new tuple containing only the selected columns, in the selected order. The indexes come from the binder again. * was already expanded into a column list, so there's no special case.
+
+5. Output
+- Return or yield the result rows, plus the column names for a header
+- Printing them as a table is the REPL's job, not the executor's
+
+Structuring it: you can write steps 2–4 as one loop. You can also make each step its own small piece that takes rows in and yields rows out (scan → filter → project), chained together. That's the iterator (Volcano) model from the reading list, and it's how real executors are built. It also makes adding pieces later easy: a sort, a limit, or a join is just another step in the chain.
+
+
+"""
