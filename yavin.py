@@ -34,8 +34,9 @@ class Tokentype(Enum):
         
     
 keywords = {'SELECT': Tokentype.SELECT, 'FROM': Tokentype.FROM, 'WHERE': Tokentype.WHERE, 'AND': Tokentype.AND, 'OR': Tokentype.OR}
-
 symbols = {'*': Tokentype.STAR, ',': Tokentype.COMMA}
+
+types = {'int': int, 'char': str}
 
 
 one_char_operators = {'=': Tokentype.EQ, '<': Tokentype.LT, '>': Tokentype.GT}
@@ -346,13 +347,9 @@ class Parser:
 
 
     def parse_from(self):
-
         self.expect(Tokentype.IDENTIFIER)
         token = self.advance()
         return Table(token.value)
-
-
-
 
 
     def parse_where(self):
@@ -407,8 +404,8 @@ class Binder:
     def __init__(self, catalog_file='catalog.json'):
         self.catalog_file = catalog_file
         self.schema = self.get_schema()
-        self.parsed_tree = None
-        self.query_tree = None
+        self.parsed_tokens = None
+        self.table_list = []
 
     def get_schema(self):
         with open(self.catalog_file) as f:
@@ -416,15 +413,88 @@ class Binder:
         return data
 
     def bind(self, parsed_tokens):
-        self.parsed_tree = parsed_tokens
-        self.query_tree = parsed_tokens
+        self.parsed_tokens = parsed_tokens
 
-        print(self.schema)
+        self.check_tables()
+
+        self.check_columns()
+
+        self.check_where()
+
+        return self.parsed_tokens
+
+    def check_where(self):
+        tree = self.parsed_tokens.where
+
+
+        def recursive_check(el):
+            if isinstance(el, (AND, OR)):
+                el.left = recursive_check(el.left)
+                el.right = recursive_check(el.right)
+
+            else:
+                l, r, op = el.left, el.right, el.op
+                if isinstance(l, Column): l = self.check_column(l)[0]
+                if isinstance(r, Column): r = self.check_column(r)[0]
+
+                # w have 3 comparision: literal literal, column column and literal column (and column literal but this doesnt matter since its the same)
+
+                if isinstance(l, Literal) and isinstance(r, Literal):
+                    if not type(l.val) == type(r.val): raise ValueError(f'Cant compare types {type(l.val)} and {type(r.val)}')
+                elif isinstance(l, Column) and isinstance(r, Column):
+                    if not l.type == r.type: raise ValueError(f'Cant compare types {l.type} and {r.type}')
+                else:
+                    if isinstance(l, Column):
+                        if not types[l.type] == type(r.val): raise ValueError(f'Cant compare types {types[l.type]} and {type(r.val)}')
+                    else: 
+                        if not type(l.val) == types[r.type]: raise ValueError(f'Cant compare types {type(l.val)} and {types[r.type]}')
+                    
+                return Comparision(l, op, r)
+            
+            return el
+
+        if tree:
+            self.parsed_tokens.where = recursive_check(tree)
+
+
+    def check_tables(self):
+        # for now query has only singel table
+        query_tables = [self.parsed_tokens.from_.table]
+
+        self.table_list = []
+        for table in query_tables:
+            if table not in self.schema['tables']: raise ValueError(f"Table {table} not in the schema")
+            else: self.table_list.append((table, self.schema['tables'][table]))
+
+
+    def check_column(self, col):
+
+        if isinstance(col, Star):
+            columns = []
+            for name, table in self.table_list:
+                for table_ind, table_col in enumerate(table['columns']): columns.append(Column(table_col['name'], name, table_ind, table_col['type']))
+            return columns 
+        else:
+            matched = []
+            if col.table:
+                raise NotImplementedError
+            else:
+                for table_name, table in self.table_list:
+                    for table_ind, table_col in enumerate(table['columns']):
+                        if table_col['name'] == col.col:
+                            matched.append([table_col['name'], table_name, table_ind, table_col['type']])
+                            break # only single col with same name in singel table
+
+            if len(matched) == 0: raise ValueError(f"Column {col} not found")
+            elif len(matched) > 1: raise ValueError(f"Ambiguous column name {col}")
+            else:
+                col_name, table_name, table_ind, col_type = matched[0]
+                return [Column(col_name, table_name, table_ind, col_type)]
 
     def check_columns(self):
-        
-    
-
+        new_col_list = []
+        for col in self.parsed_tokens.columns: new_col_list += self.check_column(col)
+        self.parsed_tokens.columns = new_col_list
 
 class Executor:
     def __init__(self, catalog_file='catalog.json'):
@@ -434,13 +504,13 @@ class Executor:
     def get_schema(self):
         with open(self.catalog_file) as f:
             data = json.load(f)
-        return data    
+        return data
 
     def run(self, query):
         print(self.schema)
 
 
-query = """ SELECT name, id FROM t where a != 21 and c = "lsdkf" or 1 = 1"""
+query = """ SELECT id FROM users where id != 21"""
 
 executor = Executor()
 tokenizer = Tokenizer()
@@ -448,11 +518,12 @@ parser = Parser()
 binder = Binder()
 
 tokens = tokenizer.tokenize(query)
-print(tokens)
+# print(tokens)
 parsed_tokens = parser.parse(tokens)
 
 print(parsed_tokens)
 
 query_tree = binder.bind(parsed_tokens)
-
-# executor.run(query)
+print(query_tree)
+# print(query_tree)
+executor.run(query_tree)
