@@ -3,8 +3,8 @@ import json
 from enum import Enum, auto
 from dataclasses import dataclass
 import struct
-
-
+import operator
+from operator import itemgetter
 
 class Tokentype(Enum):
     STRING = auto()     # auto() picks a value for you (1, 2, 3...)
@@ -22,7 +22,8 @@ class Tokentype(Enum):
     # symbols
     STAR = auto()     # auto() picks a value for you (1, 2, 3...)
     COMMA = auto()
-
+    LPAREN = auto()
+    RPAREN = auto()
     
     # keywords
     SELECT = auto()     # auto() picks a value for you (1, 2, 3...)
@@ -30,12 +31,16 @@ class Tokentype(Enum):
     WHERE = auto()     # auto() picks a value for you (1, 2, 3...)
     AND = auto()
     OR = auto()
+    INSERT = auto()
+    INTO = auto()
+    VALUES = auto()
+
 
     EOF = auto()
         
     
-keywords = {'SELECT': Tokentype.SELECT, 'FROM': Tokentype.FROM, 'WHERE': Tokentype.WHERE, 'AND': Tokentype.AND, 'OR': Tokentype.OR}
-symbols = {'*': Tokentype.STAR, ',': Tokentype.COMMA}
+keywords = {'SELECT': Tokentype.SELECT, 'FROM': Tokentype.FROM, 'WHERE': Tokentype.WHERE, 'AND': Tokentype.AND, 'OR': Tokentype.OR, 'INSERT': Tokentype.INSERT, 'INTO': Tokentype.INTO, 'VALUES': Tokentype.VALUES}
+symbols = {'*': Tokentype.STAR, ',': Tokentype.COMMA, '(': Tokentype.LPAREN, ')': Tokentype.RPAREN}
 
 types = {'int': int, 'char': str}
 
@@ -44,6 +49,8 @@ one_char_operators = {'=': Tokentype.EQ, '<': Tokentype.LT, '>': Tokentype.GT}
 two_char_operators = {'!=': Tokentype.NEQ,'<>': Tokentype.NEQ, '<=': Tokentype.LTE, '>=': Tokentype.GTE}
 
 OPERATORS = (list(one_char_operators.values()) + list(two_char_operators.values()))
+
+OPERATOR_DICT = {Tokentype.EQ: operator.eq, Tokentype.LT: operator.lt, Tokentype.GT: operator.gt, Tokentype.NEQ: operator.ne, Tokentype.LTE: operator.le, Tokentype.GTE: operator.ge }
 
 class Token:
     def __init__(self, type, value, pos):
@@ -233,6 +240,12 @@ class Select:
     where: Comparision | AND | OR = None
 
 @dataclass
+class Insert:
+    to: Table
+    values: list
+
+
+@dataclass
 class Column:
     col: str
     table: str = None
@@ -288,6 +301,8 @@ class Parser:
     def peek(self):
         assert self.tokens is not None
         if self.position >= len(self.tokens) - 1: return self.tokens[self.position] #eof
+
+        if self.position == 0: return self.tokens[self.position]
         return self.tokens[self.position+1]
 
     def expect(self, type):
@@ -298,13 +313,19 @@ class Parser:
         self.tokens = tokens
         self.position = 0
 
-        parsed_query = self.parse_query()
+        first_token = self.peek()
+
+        if first_token.type  == Tokentype.SELECT:
+            parsed_query = self.parse_select()
+        elif first_token.type  == Tokentype.INSERT:
+            parsed_query = self.parse_insert()
+        
 
         return parsed_query
     
 
 
-    def parse_query(self):
+    def parse_select(self):
         self.expect(Tokentype.SELECT)
         token = self.advance()
 
@@ -325,6 +346,55 @@ class Parser:
         self.expect(Tokentype.EOF)
 
         return Select(columns, tables,  filters)
+
+
+    def parse_insert(self):
+        """ Possible extensions, later
+- A column list: INSERT INTO users (id, name) VALUES (...), where the missing columns get defaults
+- Several rows at once: VALUES (...), (...), which is just a comma loop around parse_values
+"""
+        self.expect(Tokentype.INSERT)
+        token = self.advance()
+
+        self.expect(Tokentype.INTO)
+        token = self.advance()
+
+        self.expect(Tokentype.IDENTIFIER)
+        table = Table(self.advance().value)
+
+        self.expect(Tokentype.VALUES)
+        token = self.advance()
+
+        values = self.parse_values()
+        
+        self.expect(Tokentype.EOF)
+
+        return Insert(table, values)
+
+
+    def parse_values(self):
+        values = []
+        self.expect(Tokentype.LPAREN)
+        token = self.advance()
+
+        while True:
+            next_token = self.current()
+            if next_token.type in (Tokentype.INT, Tokentype.STRING):
+                token = self.advance()
+                values.append(Literal(token.value))
+            else:
+                self.expect(Tokentype.INT) ## needs fix when we implement multi error 
+
+            next_token = self.current()
+            if next_token.type == Tokentype.COMMA: 
+                token = self.advance()
+                continue
+            elif next_token.type == Tokentype.RPAREN:
+                token = self.advance()
+                break
+            else: self.expect(Tokentype.RPAREN)
+
+        return values
 
     
     def parse_columns(self):
@@ -507,7 +577,6 @@ class Executor:
 
         self.struct_info = {}
         self.tables = {}
-        self.columns = None
 
     def get_schema(self):
         with open(self.catalog_file) as f:
@@ -547,22 +616,56 @@ class Executor:
                 yield out
 
     def eval_where(self, row):
-        pass
+        def recursive_check(el):
+            if isinstance(el, (AND, OR)):
+                l = recursive_check(el.left)
+                r = recursive_check(el.right)
+
+                if isinstance(el, AND):
+                    return (l and r)
+                else:
+                    return (l or r)
+
+            else:
+                l, r, op = el.left, el.right, el.op
+
+                if isinstance(l, Column):
+                    l = row[l.index]
+                else:
+                    l = l.val
+
+                if isinstance(r, Column): 
+                    r = row[r.index]
+                else:
+                    r = r.val                    
+     
+                return OPERATOR_DICT[op](l, r)
+            
+
+        tree = self.where
+        if tree:
+            eval = recursive_check(tree)
+            return eval
+        else: return True
 
     def run(self, query):
         queried_tables = [query.from_] # needs fix when multiple tabels
         self.tables = {}
+        self.where = query.where
         for table in queried_tables:
             self.tables[table.table] = self.schema['tables'][table.table]
 
         self.create_struct_strings()
-
+        yield [col.col for col in query.columns]
         for table_name, table_doc in self.tables.items():
             for x in self.scan(table_name, table_doc):
-                print(x)
+                eval = self.eval_where(x)
+                if eval:
+                    yield tuple(x[i] for i in [col.index for col in query.columns])
 
+# query = """ SELECT id FROM users where id != 1"""
+query = """ insert into users values (1, 2, 'joni') """
 
-query = """ SELECT id FROM users where id != 21"""
 
 executor = Executor()
 tokenizer = Tokenizer()
@@ -570,15 +673,12 @@ parser = Parser()
 binder = Binder()
 
 tokens = tokenizer.tokenize(query)
-# print(tokens)
 parsed_tokens = parser.parse(tokens)
-
 print(parsed_tokens)
 
 query_tree = binder.bind(parsed_tokens)
-print(query_tree)
-# print(query_tree)
-executor.run(query_tree)
+for row in executor.run(query_tree):
+    print(row)
 
 
 
@@ -586,27 +686,25 @@ executor.run(query_tree)
 
 
 """
-column), and the row size from it. This replaces the hardcoded "<ii8s" and 16.
+1. Consolidate what you have (small, but it pays off for everything after)
+- A REPL: a loop that reads a query, runs it and prints the result as a table. Catch your own errors and print them instead of crashing, so one bad query doesn't end the session.
+- Split yavin.py into modules: tokenizer, parser (with the AST classes), binder, executor, catalog, and a main/REPL file. The __main__ guard problem disappears with this too.
+- One shared catalog object instead of the duplicated get_schema
+- Tests for the parser, binder and executor. Precedence, error cases, * expansion, and actual result rows from a small test table. I can write them like the tokenizer tests if you want.
 
-2. Scan
-- Open the table's file and read one row at a time (row-size bytes)
-- Unpack each row into a tuple of values, e.g. (1, 30, 'bob'), stripping the zero padding from char values
-- Ideally as a generator: yield rows one at a time instead of loading the whole file
+2. Make the database writable. Right now data only comes in through create_file.py.
+- INSERT INTO users VALUES (4, 22, 'maija'): new tokens (INSERT, INTO, VALUES, parentheses), a new Insert AST node, binder checks (column count, types, string length vs char(n)), and the executor packs the row and appends it to the file.
+- CREATE TABLE t (id INT, name CHAR(16)): adds a table to the catalog and creates an empty file. After this, the catalog is managed by your database instead of by hand.
 
-3. Filter (WHERE)
-- For each row, evaluate the where tree, with the recursive function: And/Or combine their children, and a Comparison gets each side's value and applies the operator
-  - Column: row[column.index], which is where the binder's indexes get used
-  - Literal: its value
-- Keep the row if the result is true; if where is None, keep every row
+3. Then the real database internals, from the reading list:
+- Pages: store rows in fixed 4 KB pages instead of a flat file. This is the foundation for everything below.
+- DELETE / UPDATE: introduce tombstones or slotted pages and free space
+- A B+ tree index: WHERE id = 42 without scanning every row. This is the "find a record efficiently from the mass of data" problem from your README, and the most important topic on the list.
+- Buffer pool: cache pages in memory instead of reading them from disk every time
 
-4. Project (SELECT list)
-- From each kept row, build a new tuple containing only the selected columns, in the selected order. The indexes come from the binder again. * was already expanded into a column list, so there's no special case.
+Also possible at any point: ORDER BY, LIMIT, parentheses in WHERE, joins. These are smaller features that reuse what you already built.
 
-5. Output
-- Return or yield the result rows, plus the column names for a header
-- Printing them as a table is the REPL's job, not the executor's
-
-Structuring it: you can write steps 2–4 as one loop. You can also make each step its own small piece that takes rows in and yields rows out (scan → filter → project), chained together. That's the iterator (Volcano) model from the reading list, and it's how real executors are built. It also makes adding pieces later easy: a sort, a limit, or a join is just another step in the chain.
+I'd do the REPL and INSERT next, so you can use your database interactively and add data through SQL. Then pages and the B+ tree, which is where the interesting database problems start.
 
 
 """
