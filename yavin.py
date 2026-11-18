@@ -486,13 +486,51 @@ class Binder:
     def bind(self, parsed_tokens):
         self.parsed_tokens = parsed_tokens
 
-        self.check_tables()
+        if isinstance(parsed_tokens, Select):
+            self.bind_select()
+        elif isinstance(parsed_tokens, Insert):
+            self.bind_insert()
+        else:
+            raise NotImplementedError()
+
+        return self.parsed_tokens
+
+
+    def bind_insert(self):
+        self.check_tables_insert()
+
+        self.check_values()
+
+        return self.parsed_tokens
+
+    def bind_select(self):
+        self.check_tables_select()
 
         self.check_columns()
 
         self.check_where()
 
         return self.parsed_tokens
+
+    def check_values(self):
+        # number of values equals the number of cols
+        insert_vals = self.parsed_tokens.values
+        schema_cols = self.schema['tables'][self.parsed_tokens.to.table]['columns']
+
+
+        # number of values equals the number of cols
+        if len(insert_vals) != len(schema_cols): raise ValueError(f"Number of values {len(insert_vals)} doesnt match the number of column in the table {len(schema_cols)}")
+
+        
+        for insert_val, schema_col in zip(insert_vals, schema_cols):
+            # each values type matches its column type
+            if type(insert_val.val) != types[schema_col['type']]: raise ValueError(f"Cant insert type {type(insert_val.val)} to a type {types[schema_col['type']]}") 
+
+            # strings fit the column char size
+            if schema_col['type'] == 'char':
+                char_len = len(insert_val.val.encode())
+                if char_len > schema_col['size']: raise ValueError(f"Value {insert_val} is too long for char column")
+
 
     def check_where(self):
         tree = self.parsed_tokens.where
@@ -527,8 +565,16 @@ class Binder:
         if tree:
             self.parsed_tokens.where = recursive_check(tree)
 
+    def check_tables_insert(self):
+        # for now query has only singel table
+        insert_table = self.parsed_tokens.to.table
 
-    def check_tables(self):
+        self.table_list = []
+        if insert_table not in self.schema['tables']: raise ValueError(f"Table {insert_table} not in the schema")
+        else: self.table_list.append((insert_table, self.schema['tables'][insert_table]))
+ 
+
+    def check_tables_select(self):
         # for now query has only singel table
         query_tables = [self.parsed_tokens.from_.table]
 
@@ -602,7 +648,6 @@ class Executor:
                 
                 data = struct.unpack(struct_code, row)
 
-
                 out = []
                 # for i in char_ids:
                 for i, col in enumerate(table_doc['columns']):
@@ -649,6 +694,36 @@ class Executor:
         else: return True
 
     def run(self, query):
+
+        if isinstance(query, Select):
+            return self.run_select(query)
+        elif isinstance(query, Insert):
+            return self.run_insert(query)
+        else:
+            raise NotImplementedError()
+
+
+
+    def run_insert(self, query):
+                
+        """
+        1. Get the table's info from the catalog: its file, and its format string from the same code that builds it for the scan, so reading and writing always match
+        2. Convert the values to their stored form. This is the reverse of the scan's cleanup: char values are encoded from str to bytes, and ints stay as they are. struct pads short byte strings with zeros automatically.
+        3. Pack the values into a row of bytes with the format string
+        4. Append the bytes to the end of the file, opening it in binary append mode ("ab")
+        5. Report the result. Databases usually return a count, like INSERT 0 1 in Postgres or "1 row inserted", not rows.
+        """
+
+        table = query.to
+        values = query.values
+        table_schema = self.schema['tables'][table.table]
+
+        print(table)
+        print(values)
+        print(table_schema)
+
+
+    def run_select(self, query):
         queried_tables = [query.from_] # needs fix when multiple tabels
         self.tables = {}
         self.where = query.where
@@ -674,7 +749,6 @@ binder = Binder()
 
 tokens = tokenizer.tokenize(query)
 parsed_tokens = parser.parse(tokens)
-print(parsed_tokens)
 
 query_tree = binder.bind(parsed_tokens)
 for row in executor.run(query_tree):
